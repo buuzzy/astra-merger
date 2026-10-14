@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#050811">
+<title>Astra · 双黑洞并合</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050811;color:#e5eaf4}
+canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab;outline:none}
+canvas:active{cursor:grabbing}
+header{position:fixed;left:max(25px,env(safe-area-inset-left));top:max(24px,env(safe-area-inset-top));pointer-events:none}
+h1{margin:0;font-size:29px;font-weight:400;letter-spacing:.34em}
+.subtitle{color:#9daac2;font-size:11px;letter-spacing:.18em;margin-top:9px}
+.tag{display:inline-block;margin-top:18px;padding:6px 10px;border:1px solid #9ab9e333;border-radius:20px;font-size:10px;color:#c1d6ed;background:#06101e88}
+.controls{position:fixed;bottom:max(25px,env(safe-area-inset-bottom));left:max(25px,env(safe-area-inset-left));max-width:55vw}
+.hint{font-size:11px;color:#9aa9c0;margin-bottom:12px;line-height:1.8}
+button{border:1px solid #98b6e344;border-radius:7px;background:#0b1728c9;color:#d9e7fa;padding:9px 14px;margin-right:7px;cursor:pointer;font:inherit;font-size:12px}
+button:hover{background:#193049}button:focus-visible{outline:2px solid #8ddaff;outline-offset:4px}
+.panel{position:fixed;right:max(24px,env(safe-area-inset-right));bottom:max(25px,env(safe-area-inset-bottom));width:215px;border:1px solid #95b8e52b;border-radius:11px;background:#06101be8;padding:16px 18px;font-size:11px;box-shadow:0 8px 35px #0005}
+.panel-title{font-size:10px;letter-spacing:.16em;color:#839bb7;margin-bottom:12px}
+.row{display:flex;justify-content:space-between;gap:14px;margin:8px 0;color:#8da3bd}
+.row strong{color:#d3e5ff;font-weight:500;font-variant-numeric:tabular-nums}
+#phase{color:#ffd6a1}#rate{color:#83d7e9}
+progress{display:block;width:100%;height:3px;margin-top:14px;accent-color:#8bcfff;border:0}
+#health{font-size:9px;color:#8094ac;margin-top:10px}
+#error{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(90vw,650px);max-height:75vh;overflow:auto;padding:22px;border:1px solid #e3aa7c;background:#111b2bf2;border-radius:12px;white-space:pre-wrap;line-height:1.6;font-size:13px}
+[hidden]{display:none!important}
+@media(max-width:600px){header{left:17px;top:20px}h1{font-size:24px}.subtitle{font-size:9px}.panel{width:174px;right:13px;bottom:18px;padding:12px}.controls{left:14px;bottom:20px;max-width:44vw}.hint{font-size:10px}button{padding:8px;margin:3px 3px 0 0;font-size:11px}}
+</style>
+</head>
+<body>
+<canvas id="sky" tabindex="0" aria-label="实时双黑洞模拟。拖拽环绕，滚轮或双指缩放，空格暂停，R 重播。"></canvas>
+<header><h1>ASTRA</h1><div class="subtitle">BINARY BLACK HOLE · 双黑洞并合</div><div class="tag">程序化宇宙 / 强引力视觉近似</div></header>
+<div class="controls"><div class="hint">拖拽环绕 · 滚轮 / 双指缩放<br>空格暂停 · R 重新演化</div><button id="pause" type="button" aria-pressed="false">暂停</button><button id="restart" type="button">重新演化</button></div>
+<aside class="panel" aria-label="渲染与模拟状态">
+<div class="panel-title">OBSERVATORY / 观测站</div>
+<div class="row"><span>帧率</span><strong id="fps">— FPS</strong></div>
+<div class="row"><span>渲染比例</span><strong id="scale">—</strong></div>
+<div class="row"><span>模拟阶段</span><strong id="phase">旋近</strong></div>
+<div class="row"><span>模拟时间</span><strong id="clock">0.00 s</strong></div>
+<div class="row"><span>时间倍率</span><strong id="rate">1.00×</strong></div>
+<progress id="timeline" max="32" value="0" aria-label="演化进度"></progress>
+<div id="health">正在编译 WebGL2…</div>
+</aside>
+<div id="error" role="alert" hidden></div>
+<script id="vertex" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+void main(){
+  vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+  gl_Position=vec4(p*2.0-1.0,0.0,1.0);
+}
+</script>
+<script id="fragment" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+precision highp int;
+out vec4 fragColor;
+uniform vec2 uResolution;
+uniform float uTime;
+uniform vec3 uEye;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uForward;
+const float PI=3.14159265359;
+float hash31(vec3 p){
+  p=fract(p*0.1031);
+  p+=dot(p,p.yzx+33.33);
+  return fract((p.x+p.y)*p.z);
+}
+float noise3(vec3 p){
+  vec3 i=floor(p),f=fract(p);
+  f=f*f*(3.0-2.0*f);
+  return mix(mix(mix(hash31(i),hash31(i+vec3(1,0,0)),f.x),
+                 mix(hash31(i+vec3(0,1,0)),hash31(i+vec3(1,1,0)),f.x),f.y),
+             mix(mix(hash31(i+vec3(0,0,1)),hash31(i+vec3(1,0,1)),f.x),
+                 mix(hash31(i+vec3(0,1,1)),hash31(i+vec3(1,1,1)),f.x),f.y),f.z);
+}
+float fbm(vec3 p){
+  float value=0.0,amplitude=0.5;
+  for(int i=0;i<4;i++){
+    value+=amplitude*noise3(p);
+    p=p*2.03+vec3(7.1,3.7,1.3);
+    amplitude*=0.5;
+  }
+  return value;
+}
+vec3 stars(vec3 d){
+  vec3 color=vec3(0.0015,0.0025,0.006);
+  float latitude=dot(d,normalize(vec3(0.25,0.85,0.46)));
+  float band=exp(-latitude*latitude*26.0);
+  float clouds=fbm(d*7.0+8.0);
+  float dust=fbm(d*23.0+vec3(2,8,1));
+  color+=band*mix(vec3(0.014,0.018,0.05),vec3(0.09,0.07,0.115),clouds)*
+         (0.25+clouds)*smoothstep(0.20,0.65,dust);
+  color+=vec3(0.016,0.021,0.043)*pow(band,0.3)*clouds;
+  vec2 uv=vec2(atan(d.z,d.x)/(2.0*PI)+0.5,asin(clamp(d.y,-1.0,1.0))/PI+0.5);
+  for(int layer=0;layer<3;layer++){
+    float grid=110.0+float(layer)*137.0;
+    vec2 cells=vec2(grid*2.0,grid);
+    vec2 cell=floor(uv*cells),f=fract(uv*cells);
+    vec3 seed=vec3(mod(cell.x,cells.x),cell.y,float(layer)*19.0);
+    float h=hash31(seed);
+    vec2 spot=vec2(hash31(seed+12.1),hash31(seed+41.7))*0.7+0.15;
+    float radius=mix(0.025,0.065,hash31(seed+6.0));
+    float aa=clamp(grid/uResolution.y*0.20,0.01,0.12);
+    float width=radius+aa;
+    float point=exp(-dot(f-spot,f-spot)/(width*width));
+    point*=radius*radius/(width*width);
+    float gate=step(0.984+float(layer)*0.003,h);
+    vec3 tint=mix(vec3(0.58,0.76,1.0),vec3(1.0,0.78,0.52),hash31(seed+3.7));
+    color+=tint*point*gate*(2.0+5.0*hash31(seed+17.0));
+  }
+  return color;
+}
+vec3 waveSky(vec3 direction,vec3 initialRay){
+  float age=max(uTime-20.0,0.0);
+  if(uTime>=20.0){
+    vec3 center=normalize(-uEye);
+    vec3 tangent=initialRay-center*dot(initialRay,center);
+    tangent/=max(length(tangent),0.0001);
+    float impact=length(cross(uEye,initialRay));
+    float wave=0.0;
+    for(int i=0;i<3;i++){
+      float radius=age*2.4-float(i)*0.9;
+      float offset=impact-radius;
+      wave+=step(0.0,radius)*exp(-offset*offset*1.8)*sin(offset*8.0-age*3.0);
+    }
+    float envelope=exp(-age*0.27)*smoothstep(0.0,0.12,age);
+    direction=normalize(direction+tangent*wave*envelope*0.043);
+  }
+  return stars(direction);
+}
+// Local optically thin volume; velocity projected toward the ray's observer.
+vec4 disk(vec3 q,vec3 ray,float rs,vec3 normal,vec3 tint,float offset){
+  if(rs<0.018) return vec4(0);
+  float height=dot(q,normal);
+  vec3 planar=q-normal*height;
+  float radius=length(planar);
+  float inner=rs*1.78,outer=rs*4.8,thickness=rs*0.13;
+  if(radius<inner || radius>outer || abs(height)>thickness*3.0) return vec4(0);
+  vec3 tangent=normalize(cross(normal,planar));
+  float beta=min(0.58,sqrt(rs/(2.0*radius)));
+  float doppler=pow(1.0/max(0.38,1.0-beta*dot(tangent,-ray)),3.0);
+  float angle=atan(planar.z,planar.x);
+  float rotation=uTime*1.7/pow(radius/rs,1.5)+offset;
+  float spiral=0.6+0.4*sin(angle*7.0-radius/rs*8.0+rotation*5.0);
+  vec3 swirl=vec3(cos(angle-rotation),sin(angle-rotation),height/rs)*radius/rs;
+  float turbulence=0.5+0.5*noise3(swirl*5.0+offset);
+  float edge=smoothstep(inner,inner+rs*0.35,radius)*(1.0-smoothstep(outer-rs,outer,radius));
+  float density=exp(-height*height/(thickness*thickness))*edge*(0.6+0.4*spiral)*turbulence;
+  float heat=pow(inner/radius,0.85);
+  vec3 emission=mix(tint,vec3(1.0,0.91,0.73),heat*0.66)*heat*doppler*2.4;
+  return vec4(emission,density/(thickness*2.0));
+}
+float diskStep(vec3 q,float rs,vec3 n){
+  if(rs<0.018) return 0.46;
+  float height=dot(q,n);
+  float radius=length(q-n*height);
+  if(radius>rs*1.55 && radius<rs*5.1) return max(0.018,abs(height)*0.45);
+  return 0.46;
+}
+void main(){
+  vec2 screen=(2.0*gl_FragCoord.xy-uResolution)/uResolution.y;
+  vec3 ray=normalize(uForward*1.85+uRight*screen.x+uUp*screen.y);
+  vec3 initialRay=ray,p=uEye;
+  float t=min(uTime,20.0);
+  float fusion=smoothstep(18.2,20.0,t);
+  float separation=5.7*pow(max(1.0-t/20.0,0.0),0.36)*(1.0-fusion);
+  float angle=0.48*t+2.1*log(20.7/(20.7-t));
+  vec3 orbit=vec3(cos(angle),0.04*sin(angle*2.0),sin(angle));
+  float age=max(uTime-20.0,0.0);
+  float ringing=exp(-age*0.8)*sin(age*8.0)*step(20.0,uTime);
+  vec3 a=-orbit*separation*0.46+vec3(0,0.075*ringing,0);
+  vec3 b= orbit*separation*0.54;
+  float ra=mix(0.46,0.84,fusion)*(1.0+0.025*ringing);
+  float rb=0.39*(1.0-fusion);
+  vec3 na=normalize(vec3(0.08*(1.0-fusion)+0.06*ringing,1.0,0.1*(1.0-fusion)));
+  vec3 nb=normalize(vec3(-0.12,1.0,-0.12));
+  vec3 color=vec3(0);
+  float transmission=1.0;
+  bool captured=false,escaped=false;
+  for(int i=0;i<168;i++){
+    vec3 qa=p-a,qb=p-b;
+    float da=length(qa),db=length(qb);
+    if(da<ra || (rb>0.018 && db<rb)) {captured=true;break;}
+    float gap=min(da-ra,rb>0.018?db-rb:100.0);
+    float stepSize=clamp(gap*0.18+0.018,0.018,0.46);
+    stepSize=min(stepSize,min(diskStep(qa,ra,na),diskStep(qb,rb,nb)));
+    vec4 daLight=disk(qa,ray,ra,na,vec3(1.0,0.30,0.055),0.0);
+    vec4 dbLight=disk(qb,ray,rb,nb,vec3(0.24,0.57,1.0),4.0);
+    float alphaA=1.0-exp(-daLight.a*stepSize*0.65);
+    float alphaB=1.0-exp(-dbLight.a*stepSize*0.65);
+    color+=transmission*(daLight.rgb*alphaA+dbLight.rgb*alphaB);
+    transmission*=(1.0-alphaA)*(1.0-alphaB);
+    // Enhanced photon-sphere emission: an intentionally artistic ring cue.
+    float ringA=exp(-pow((da/ra-1.5)/0.16,2.0))/ra;
+    float ringB=0.0;
+    if(rb>0.018) ringB=exp(-pow((db/rb-1.5)/0.16,2.0))/rb;
+    color+=transmission*stepSize*0.055*(ringA*vec3(1,0.58,0.22)+ringB*vec3(0.40,0.72,1));
+    // Weak-field Schwarzschild-like transverse deflection, superposed for two bodies.
+    vec3 pull=ra*qa/max(da*da*da,0.0001)+rb*qb/max(db*db*db,0.0001);
+    vec3 bending=-1.5*(pull-ray*dot(pull,ray));
+    vec3 nextRay=normalize(ray+bending*stepSize);
+    p+=normalize(ray+nextRay)*stepSize;
+    ray=nextRay;
+    if(length(p)>28.0 && dot(p,ray)>0.0) {escaped=true;break;}
+    if(transmission<0.008) break;
+  }
+  // Do not leak stars through unresolved near-photon-sphere orbits.
+  if(!escaped && (length(p-a)<ra*2.0 || (rb>0.018 && length(p-b)<rb*2.0))) captured=true;
+  if(!captured) color+=transmission*waveSky(ray,initialRay);
+  float vignette=1.0-0.14*smoothstep(0.25,2.0,length(screen));
+  color=vec3(1.0)-exp(-color*1.35);
+  color=pow(max(color,vec3(0)),vec3(1.0/2.2))*vignette;
+  color+=(hash31(vec3(gl_FragCoord.xy,0.0))-0.5)/255.0;
+  fragColor=vec4(clamp(color,0.0,1.0),1.0);
+}
+</script>
+<script>
+'use strict';
+(() => {
+  const $=id=>document.getElementById(id);
+  const canvas=$('sky'), errorBox=$('error');
+  const hud={fps:$('fps'),scale:$('scale'),phase:$('phase'),clock:$('clock'),rate:$('rate'),health:$('health')};
+  let gl,program,vao,uniforms,raf=0,running=false,contextLost=false;
+  let time=0,paused=false,yaw=0.24,pitch=0.34,distance=12.8;
+  let quality=0.8,effectiveScale=0.8,lastDpr=0,resizeDirty=true;
+  let last=0,frameCount=0,sampleFrames=0,sampleSeconds=0,fps=60,cooldown=0,lastHud=0;
+  let selfTestPassed=false,lastError='',maxWidth=4096,maxHeight=4096;
+  const pointers=new Map();
+  let pinch=0;
+  const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
+  const stage=()=>time<18.2?'旋近':time<21?'并合':'铃宕';
+  const speed=()=>paused||time>=32?0:time>=17.2&&time<22?0.24:1;
+  function fail(error){
+    running=false;cancelAnimationFrame(raf);
+    lastError=error instanceof Error?error.message:String(error);
+    errorBox.hidden=false;errorBox.textContent='无法继续渲染：\n'+lastError+'\n请使用启用硬件加速且支持 WebGL2 的现代浏览器。';
+    hud.health.textContent='渲染已停止 · 查看错误详情';
+  }
+  function compile(type,source){
+    const shader=gl.createShader(type);
+    if(!shader) throw new Error('无法创建着色器');
+    gl.shaderSource(shader,source);gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){
+      const log=gl.getShaderInfoLog(shader);gl.deleteShader(shader);
+      throw new Error((type===gl.VERTEX_SHADER?'顶点':'片元')+'着色器编译失败：\n'+log);
+    }
+    return shader;
+  }
+  function drawAt(simulationTime,width,height){
+    gl.useProgram(program);gl.bindVertexArray(vao);gl.viewport(0,0,width,height);
+    const sy=Math.sin(yaw),cy=Math.cos(yaw),sp=Math.sin(pitch),cp=Math.cos(pitch);
+    gl.uniform2f(uniforms.uResolution,width,height);
+    gl.uniform1f(uniforms.uTime,simulationTime);
+    gl.uniform3f(uniforms.uEye,distance*sy*cp,distance*sp,distance*cy*cp);
+    gl.uniform3f(uniforms.uForward,-sy*cp,-sp,-cy*cp);
+    gl.uniform3f(uniforms.uRight,cy,0,-sy);
+    gl.uniform3f(uniforms.uUp,-sy*sp,cp,-cy*sp);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+  function selfTest(){
+    const framebuffer=gl.createFramebuffer(),buffer=gl.createRenderbuffer();
+    if(!framebuffer||!buffer) throw new Error('无法创建自检缓冲区');
+    try{
+      gl.bindFramebuffer(gl.FRAMEBUFFER,framebuffer);
+      gl.bindRenderbuffer(gl.RENDERBUFFER,buffer);
+      gl.renderbufferStorage(gl.RENDERBUFFER,gl.RGBA8,48,32);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,buffer);
+      if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error('自检帧缓冲区不完整');
+      const pixels=new Uint8Array(48*32*4);
+      for(const sampleTime of [0,19.5,20,24,32]){
+        drawAt(sampleTime,48,32);
+        gl.readPixels(0,0,48,32,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+        const code=gl.getError();
+        if(code!==gl.NO_ERROR) throw new Error('WebGL 绘制自检失败，时间 '+sampleTime+'，错误 '+code);
+        let luminance=0;
+        for(let i=0;i<pixels.length;i+=4) luminance+=pixels[i]+pixels[i+1]+pixels[i+2];
+        if(luminance===0) throw new Error('自检发现空白画面，时间 '+sampleTime);
+      }
+      selfTestPassed=true;hud.health.textContent='WebGL2 · 五阶段绘制自检通过';
+    }finally{
+      gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindRenderbuffer(gl.RENDERBUFFER,null);
+      gl.deleteFramebuffer(framebuffer);gl.deleteRenderbuffer(buffer);
+    }
+  }
+  function resize(){
+    const dpr=window.devicePixelRatio||1;
+    const w=Math.max(1,window.innerWidth),h=Math.max(1,window.innerHeight);
+    const nativeW=w*dpr,nativeH=h*dpr;
+    const budget=Math.sqrt(2400000/(nativeW*nativeH));
+    const ratio=Math.min(quality,budget,maxWidth/nativeW,maxHeight/nativeH);
+    const rw=Math.max(1,Math.floor(nativeW*ratio)),rh=Math.max(1,Math.floor(nativeH*ratio));
+    if(canvas.width!==rw||canvas.height!==rh){canvas.width=rw;canvas.height=rh;}
+    effectiveScale=Math.sqrt((rw*rh)/(nativeW*nativeH));
+    lastDpr=dpr;resizeDirty=false;
+  }
+  function updateHud(){
+    hud.fps.textContent=fps.toFixed(1)+' FPS';
+    hud.scale.textContent=(effectiveScale*100).toFixed(0)+'% · '+canvas.width+'×'+canvas.height;
+    hud.phase.textContent=stage();hud.clock.textContent=time.toFixed(2)+' s';
+    hud.rate.textContent=paused?'已暂停':time>=32?'已稳定':speed().toFixed(2)+'×'+(speed()<1?' 慢动作':'');
+    $('timeline').value=time;
+  }
+  function frame(now){
+    if(!running||contextLost) return;
+    raf=requestAnimationFrame(frame);
+    if(document.hidden){last=now;sampleFrames=0;sampleSeconds=0;return;}
+    const raw=last?Math.max(0.0001,(now-last)/1000):1/60;
+    last=now;
+    time=Math.min(32,time+Math.min(raw,0.05)*speed());
+    if(resizeDirty||lastDpr!==(window.devicePixelRatio||1)) resize();
+    drawAt(time,canvas.width,canvas.height);frameCount++;
+    sampleFrames++;sampleSeconds+=raw;
+    if(sampleSeconds>=1.5){
+      fps=sampleFrames/sampleSeconds;
+      if(now>=cooldown){
+        let next=quality;
+        if(fps<50) next=Math.max(0.30,quality*0.85);
+        else if(fps>58) next=Math.min(1,quality+0.05);
+        if(Math.abs(next-quality)>0.0001){quality=next;resizeDirty=true;cooldown=now+1500;}
+      }
+      sampleFrames=0;sampleSeconds=0;
+    }
+    if(now-lastHud>200){updateHud();lastHud=now;}
+    if(frameCount%120===0){
+      const code=gl.getError();
+      if(code!==gl.NO_ERROR&&!gl.isContextLost()) fail(new Error('WebGL 运行错误 '+code));
+    }
+  }
+  function initialize(){
+    try{
+      gl=canvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,stencil:false,powerPreference:'high-performance'});
+      if(!gl) throw new Error('此浏览器或设备不支持 WebGL2');
+      const vs=compile(gl.VERTEX_SHADER,$('vertex').textContent);
+      const fs=compile(gl.FRAGMENT_SHADER,$('fragment').textContent);
+      program=gl.createProgram();
+      if(!program) throw new Error('无法创建 WebGL 程序');
+      gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);
+      gl.deleteShader(vs);gl.deleteShader(fs);
+      if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error('着色器链接失败：\n'+gl.getProgramInfoLog(program));
+      vao=gl.createVertexArray();
+      if(!vao) throw new Error('无法创建顶点数组');
+      uniforms={};
+      for(const name of ['uResolution','uTime','uEye','uRight','uUp','uForward']){
+        uniforms[name]=gl.getUniformLocation(program,name);
+        if(uniforms[name]===null) throw new Error('找不到着色器参数 '+name);
+      }
+      const limits=gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+      const bufferLimit=gl.getParameter(gl.MAX_RENDERBUFFER_SIZE);
+      maxWidth=Math.min(limits[0],bufferLimit);maxHeight=Math.min(limits[1],bufferLimit);
+      gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.DITHER);
+      selfTest();resize();drawAt(time,canvas.width,canvas.height);
+      errorBox.hidden=true;lastError='';contextLost=false;running=true;
+      last=0;sampleFrames=0;sampleSeconds=0;cooldown=performance.now()+1500;
+      cancelAnimationFrame(raf);raf=requestAnimationFrame(frame);updateHud();
+    }catch(error){fail(error);}
+  }
+  function togglePause(){
+    paused=!paused;
+    $('pause').textContent=paused?'继续':'暂停';$('pause').setAttribute('aria-pressed',String(paused));
+    updateHud();
+  }
+  function restart(){
+    time=0;
+    if(paused) togglePause();
+    last=0;updateHud();
+  }
+  $('pause').addEventListener('click',togglePause);
+  $('restart').addEventListener('click',restart);
+  window.addEventListener('keydown',event=>{
+    if(event.repeat||event.altKey||event.ctrlKey||event.metaKey) return;
+    if(event.code==='Space'&&event.target.tagName!=='BUTTON'){event.preventDefault();togglePause();}
+    if(event.code==='KeyR') restart();
+  });
+  const pinchDistance=()=>{
+    const points=[...pointers.values()];
+    return points.length===2?Math.hypot(points[0].x-points[1].x,points[0].y-points[1].y):0;
+  };
+  canvas.addEventListener('pointerdown',event=>{
+    if(event.pointerType==='mouse'&&event.button!==0) return;
+    canvas.setPointerCapture(event.pointerId);
+    pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});pinch=pinchDistance();
+  });
+  canvas.addEventListener('pointermove',event=>{
+    const old=pointers.get(event.pointerId);
+    if(!old) return;
+    pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
+    if(pointers.size===1){
+      yaw-=(event.clientX-old.x)*0.006;
+      pitch=clamp(pitch+(event.clientY-old.y)*0.006,-1.35,1.35);
+    }else if(pointers.size===2){
+      const next=pinchDistance();
+      if(pinch>0&&next>0) distance=clamp(distance*pinch/next,5.4,24);
+      pinch=next;
+    }
+  });
+  const release=event=>{pointers.delete(event.pointerId);pinch=pinchDistance();};
+  for(const name of ['pointerup','pointercancel','lostpointercapture']) canvas.addEventListener(name,release);
+  canvas.addEventListener('wheel',event=>{
+    event.preventDefault();
+    const delta=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?window.innerHeight:1);
+    distance=clamp(distance*Math.exp(clamp(delta,-500,500)*0.001),5.4,24);
+  },{passive:false});
+  window.addEventListener('resize',()=>{resizeDirty=true;});
+  document.addEventListener('visibilitychange',()=>{last=0;sampleFrames=0;sampleSeconds=0;pointers.clear();pinch=0;});
+  canvas.addEventListener('webglcontextlost',event=>{
+    event.preventDefault();contextLost=true;running=false;cancelAnimationFrame(raf);
+    selfTestPassed=false;hud.health.textContent='WebGL 上下文丢失 · 等待恢复';
+    errorBox.hidden=false;errorBox.textContent='图形上下文暂时丢失，恢复后将自动继续。';
+  });
+  canvas.addEventListener('webglcontextrestored',initialize);
+  // Local inspection hook: no dependencies, network requests or image textures.
+  window.astraTest=Object.freeze({
+    snapshot:()=>({time,phase:stage(),frames:frameCount,selfTestPassed,error:lastError,
+      width:canvas.width,height:canvas.height,scale:effectiveScale,dpr:lastDpr,yaw,pitch,distance}),
+    seek:value=>{if(Number.isFinite(value)){time=clamp(value,0,32);updateHud();}}
+  });
+  initialize();
+})();
+</script>
+</body>
+</html>
